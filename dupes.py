@@ -117,6 +117,23 @@ def read_manifest(group_dir: Path) -> dict[Path, Path]:
     return mapping
 
 
+def rmtree_with_retry(dir_path: Path, retries: int = 40, delay: float = 0.15) -> bool:
+    """
+    Delete a directory tree, retrying on WinError 32 / PermissionError.
+    Returns True if removed, False if still present after retries.
+    """
+    for _ in range(retries):
+        try:
+            if dir_path.exists():
+                shutil.rmtree(dir_path)
+            return True
+        except PermissionError:
+            time.sleep(delay)
+        except FileNotFoundError:
+            return True
+    return not dir_path.exists()
+
+
 def delete_with_retry(path: Path, retries: int = 12, delay: float = 0.15) -> bool:
     """
     Windows can lock files if they're being served/viewed.
@@ -287,6 +304,8 @@ def main() -> int:
         )
 
         restore_selected_and_delete_rest(group_dir, result.keep_names)
+        if not rmtree_with_retry(group_dir):
+            print(f"⚠️ Could not remove group folder (still locked): {group_dir}")
         print("Applied selection. Next group...")
 
     print("\nAll groups processed. 🎉")
