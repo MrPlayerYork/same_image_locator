@@ -228,19 +228,19 @@ class ReviewServer:
   <meta charset="utf-8"/>
   <title>Dupe Reviewer</title>
   <style>
-    body {{ font-family: system-ui, Segoe UI, Arial; margin: 16px; }}
-    h2 {{ margin: 0 0 10px; }}
-    .topbar {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }}
-    .pill {{ padding: 6px 10px; border-radius: 999px; background: #f2f2f2; font-size: 12px; }}
-    button {{ padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }}
-    button:hover {{ background: #f7f7f7; }}
-    .danger {{ border-color: #d55; }}
-    .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }}
-    .card {{ border: 1px solid #ddd; border-radius: 12px; padding: 10px; }}
-    .name {{ font-size: 12px; color: #333; margin-bottom: 8px; word-break: break-all; }}
-    img {{ width: 100%; height: auto; border-radius: 10px; }}
-    .keep {{ outline: 4px solid #2ecc71; }}
-    .hint {{ color: #666; font-size: 13px; margin: 8px 0 14px; }}
+    body { font-family: system-ui, Segoe UI, Arial; margin: 16px; }
+    h2 { margin: 0 0 10px; }
+    .topbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .pill { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; font-size: 12px; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+    button:hover { background: #f7f7f7; }
+    .danger { border-color: #d55; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 10px; }
+    .name { font-size: 12px; color: #333; margin-bottom: 8px; word-break: break-all; }
+    img { width: 100%; height: auto; border-radius: 10px; }
+    .keep { outline: 4px solid #2ecc71; }
+    .hint { color: #666; font-size: 13px; margin: 8px 0 14px; }
   </style>
 </head>
 <body>
@@ -260,27 +260,27 @@ class ReviewServer:
   <div class="grid" id="grid"></div>
 
 <script>
-async function getJSON(url) {{
+async function getJSON(url) {
   const r = await fetch(url);
   return await r.json();
-}}
+}
 
-async function postJSON(url, body) {{
-  const r = await fetch(url, {{
+async function postJSON(url, body) {
+  const r = await fetch(url, {
     method: "POST",
-    headers: {{ "Content-Type": "application/json" }},
-    body: JSON.stringify(body || {{}})
-  }});
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {})
+  });
   return await r.json();
-}}
+}
 
 let KEEP = new Set();
 let IMAGES = [];
 
-function render() {{
+function render() {
   const grid = document.getElementById("grid");
   grid.innerHTML = "";
-  for (const name of IMAGES) {{
+  for (const name of IMAGES) {
     const card = document.createElement("div");
     card.className = "card";
 
@@ -293,59 +293,59 @@ function render() {{
     img.loading = "lazy";
     img.className = KEEP.has(name) ? "keep" : "";
 
-    img.onclick = async () => {{
-      const res = await postJSON("/api/toggle_keep", {{name}});
-      if (res.ok) {{
+    img.onclick = async () => {
+      const res = await postJSON("/api/toggle_keep", {name});
+      if (res.ok) {
         KEEP = new Set(res.keep || []);
         render();
-      }} else {{
+      } else {
         alert(res.error || "Toggle failed");
-      }}
-    }};
+      }
+    };
 
     card.appendChild(label);
     card.appendChild(img);
     grid.appendChild(card);
-  }}
-}}
+  }
+}
 
-async function refresh() {{
+async function refresh() {
   const data = await getJSON("/api/group");
   const status = document.getElementById("status");
   const finishedClicks = document.getElementById("finishedClicks");
 
-  if (!data.active) {{
+  if (!data.active) {
     status.textContent = "No active group yet (script is preparing one)...";
     finishedClicks.textContent = "Finished clicks: 0/2";
     IMAGES = [];
     KEEP = new Set();
     render();
     return;
-  }}
+  }
 
   status.textContent = "Active group: " + data.group_dir;
   IMAGES = data.images || [];
   KEEP = new Set(data.keep || []);
   finishedClicks.textContent = "Finished clicks: " + (data.finished_clicks || 0) + "/2";
   render();
-}}
+}
 
 document.getElementById("btnRefresh").onclick = refresh;
 
-document.getElementById("btnReset").onclick = async () => {{
-  await postJSON("/api/reset_finished", {{}});
+document.getElementById("btnReset").onclick = async () => {
+  await postJSON("/api/reset_finished", {});
   await refresh();
-}};
+};
 
-document.getElementById("btnFinished").onclick = async () => {{
-  const res = await postJSON("/api/finished", {{}});
+document.getElementById("btnFinished").onclick = async () => {
+  const res = await postJSON("/api/finished", {});
   await refresh();
-  if (res.confirmed) {{
+  if (res.confirmed) {
     alert("Confirmed! You can leave this tab open; the script will move on automatically.");
-  }} else {{
+  } else {
     alert("Press Finished one more time to confirm deletion of unselected files.");
-  }}
-}};
+  }
+};
 
 // auto refresh occasionally
 setInterval(refresh, 1500);
