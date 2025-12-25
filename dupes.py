@@ -13,6 +13,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+from rich.traceback import install
+from rich import print
 
 IMG_EXTS = {
     ".jpg",
