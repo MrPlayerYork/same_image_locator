@@ -7,9 +7,8 @@ import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from flask import Response
 
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import Flask, jsonify, request, Response
 
 STATE_FILENAME = "_review_state.json"
 MANIFEST_NAME = "_manifest.tsv"

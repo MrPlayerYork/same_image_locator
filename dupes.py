@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import shutil
 import time
-import os
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
