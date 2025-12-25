@@ -59,7 +59,7 @@ class ReviewServer:
             self._app.run(
                 host=self.host,
                 port=self.port,
-                debug=False,
+                debug=True,
                 use_reloader=False,
                 threaded=True,
             )
@@ -362,11 +362,11 @@ function mkCard(name) {
 
 function imagesKey(images) {
   // stable compare (order-insensitive)
-  return [...images].sort().join("\n");
+  return [...images].sort().join("\\n");
 }
 
 function keepKey(keep) {
-  return [...keep].sort().join("\n");
+  return [...keep].sort().join("\\n");
 }
 
 function reconcileGrid() {
