@@ -3,15 +3,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import shutil
+import time
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from rich import print
-from rich.traceback import install
 
 from web_review import ReviewServer, serve_review_ui
-
-install(show_locals=True)
 
 IMG_EXTS = {
     ".jpg",
@@ -65,7 +63,7 @@ def find_exact_groups(files: list[Path]) -> list[DupeGroup]:
             continue
 
     by_hash: dict[str, list[Path]] = defaultdict(list)
-    for _, bucket in by_size.items():
+    for bucket in by_size.values():
         if len(bucket) < 2:
             continue
         for f in bucket:
@@ -119,10 +117,38 @@ def read_manifest(group_dir: Path) -> dict[Path, Path]:
     return mapping
 
 
+def delete_with_retry(path: Path, retries: int = 12, delay: float = 0.15) -> bool:
+    """
+    Windows can lock files if they're being served/viewed.
+    Retry a few times before giving up.
+    Returns True if deleted, False otherwise.
+    """
+    for i in range(retries):
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except PermissionError:
+            time.sleep(delay)
+        except FileNotFoundError:
+            return True
+    return False
+
+
+def copy_with_retry(
+    src: Path, dst: Path, retries: int = 40, delay: float = 0.10
+) -> None:
+    for _ in range(retries):
+        try:
+            shutil.copy2(src, dst)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    shutil.copy2(src, dst)  # last try
+
+
 def restore_selected_and_delete_rest(group_dir: Path, keep_names: set[str]) -> None:
     mapping = read_manifest(group_dir)
 
-    # Files currently in decision group dir (excluding manifest + state)
     present = [
         p
         for p in group_dir.iterdir()
@@ -130,62 +156,94 @@ def restore_selected_and_delete_rest(group_dir: Path, keep_names: set[str]) -> N
         and p.name.lower() not in {MANIFEST_NAME.lower(), "_review_state.json"}
     ]
 
-    # If user selected nothing, we interpret as "keep nothing" (and delete all).
-    # You can change this behavior if you want.
     for moved_path in present:
         name = moved_path.name
         if name not in keep_names:
-            moved_path.unlink(missing_ok=True)
+            if not delete_with_retry(moved_path):
+                pending = moved_path.with_name(moved_path.name + ".pending_delete")
+                try:
+                    moved_path.rename(pending)
+                    delete_with_retry(pending)
+                except Exception:
+                    print(f"⚠️ Could not delete (locked): {moved_path}")
             continue
 
         original = mapping.get(moved_path)
         if original is None:
-            # fallback: match by filename
             for k, v in mapping.items():
                 if k.name == name:
                     original = v
                     break
 
         if original is None:
-            # Can't restore without mapping; leave it there (safer)
+            # safer: leave it there if we can't map
             continue
 
         original = original.expanduser()
         original.parent.mkdir(parents=True, exist_ok=True)
 
         if original.exists():
-            # avoid overwrite
             original = safe_unique_name(original.parent, original.name)
 
-        shutil.move(str(moved_path), str(original))
+        copy_with_retry(moved_path, original)
+
+        if not delete_with_retry(moved_path):
+            # can't delete because it's locked -> don't crash, quarantine it
+            stuck = moved_path.with_name(moved_path.name + ".stuck")
+            try:
+                moved_path.rename(stuck)
+                print(f"⚠️ Source locked, left behind as: {stuck}")
+            except Exception:
+                print(f"⚠️ Source locked and couldn't rename: {moved_path}")
+
+
+def stage_all_groups_into_decision_folder(
+    groups: list[DupeGroup], decision_root: Path, dry_run: bool
+) -> list[Path]:
+    """
+    Moves ALL groups into decision folders first, writes manifests.
+    Returns list of created group directories, in processing order.
+    """
+    created: list[Path] = []
+
+    for i, grp in enumerate(groups, 1):
+        group_dir = decision_root / f"group_{i:04d}_sha_{grp.digest[:10]}"
+        if group_dir.exists():
+            # If it already exists, treat it as staged and include it.
+            created.append(group_dir)
+            continue
+
+        if dry_run:
+            print(f"(dry-run) Would stage group into: {group_dir}")
+            continue
+
+        group_dir.mkdir(parents=True, exist_ok=False)
+        moved_to_original: list[tuple[Path, Path]] = []
+
+        for original in grp.files:
+            dst = safe_unique_name(group_dir, original.name)
+            shutil.move(str(original), str(dst))
+            moved_to_original.append((dst, original))
+
+        write_manifest(group_dir, moved_to_original)
+        created.append(group_dir)
+
+    return created
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Interactive dupe cleanup with a local Flask UI (exact dupes)."
+        description="Stage all exact dupes, then review via local Flask UI."
     )
     ap.add_argument("root", type=Path, help="Root folder to scan")
-    ap.add_argument(
-        "--decision-folder",
-        type=Path,
-        default=Path("_DECISION_DUPES"),
-        help="Folder where duplicate groups are moved for review",
-    )
-    ap.add_argument(
-        "--include-all",
-        action="store_true",
-        help="Scan all files, not just image extensions",
-    )
-    ap.add_argument(
-        "--dry-run", action="store_true", help="Find groups, but don't move/delete"
-    )
+    ap.add_argument("--decision-folder", type=Path, default=Path("_DECISION_DUPES"))
+    ap.add_argument("--include-all", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5173)
-    ap.add_argument(
-        "--no-open", action="store_true", help="Don't auto-open the browser tab"
-    )
-
+    ap.add_argument("--no-open", action="store_true")
     args = ap.parse_args()
+
     root = args.root.expanduser().resolve()
     decision_root = args.decision_folder.expanduser().resolve()
 
@@ -204,42 +262,32 @@ def main() -> int:
     decision_root.mkdir(parents=True, exist_ok=True)
     print(f"Decision folder: {decision_root}")
 
+    print("\nStaging all groups into the decision folder...")
+    group_dirs = stage_all_groups_into_decision_folder(
+        groups, decision_root, dry_run=args.dry_run
+    )
+
+    if args.dry_run:
+        print("\nDry-run complete.")
+        return 0
+
+    print(f"Staged groups ready to review: {len(group_dirs)}")
+
     server = ReviewServer(host=args.host, port=args.port)
 
-    for i, grp in enumerate(groups, 1):
+    for idx, group_dir in enumerate(group_dirs, 1):
+        if not (group_dir / MANIFEST_NAME).exists():
+            print(f"Skipping (no manifest): {group_dir}")
+            continue
+
         print("\n" + "=" * 72)
-        print(
-            f"Group {i}/{len(groups)} | {len(grp.files)} duplicates | SHA256 {grp.digest[:12]}..."
+        print(f"Review {idx}/{len(group_dirs)}: {group_dir.name}")
+        result = serve_review_ui(
+            server, group_dir, open_browser=(not args.no_open), mode="exact"
         )
-        for p in grp.files:
-            print(f"  - {p}")
-
-        group_dir = decision_root / f"group_{i:04d}_sha_{grp.digest[:10]}"
-        if group_dir.exists():
-            print(f"⚠️  Group folder already exists, skipping: {group_dir}")
-            continue
-
-        if args.dry_run:
-            print(f"(dry-run) Would move into: {group_dir}")
-            continue
-
-        group_dir.mkdir(parents=True, exist_ok=False)
-
-        moved_to_original: list[tuple[Path, Path]] = []
-        for original in grp.files:
-            dst = safe_unique_name(group_dir, original.name)
-            shutil.move(str(original), str(dst))
-            moved_to_original.append((dst, original))
-
-        write_manifest(group_dir, moved_to_original)
-
-        print(f"\nReview this group in your browser: http://{args.host}:{args.port}")
-        result = serve_review_ui(server, group_dir, open_browser=(not args.no_open))
-
-        print(f"Confirmed keep count: {len(result.keep_names)}")
 
         restore_selected_and_delete_rest(group_dir, result.keep_names)
-        print("Done. Moving to next group...")
+        print("Applied selection. Next group...")
 
     print("\nAll groups processed. 🎉")
     return 0
