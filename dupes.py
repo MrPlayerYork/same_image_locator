@@ -319,6 +319,20 @@ def main() -> int:
                 )
             ui.log_main("Applied selection. Next group...")
 
+        # Final cleanup pass: remove any leftover group folders from this run or older runs
+        ui.log_main("\nFinal cleanup: removing leftover group folders...")
+        for p in sorted(decision_root.glob("group_*")):
+            if p.is_dir():
+                if not rmtree_with_retry(p):
+                    ui.log_main(f"⚠️ Still locked, couldn't remove: {p}")
+
+        # If decision_root is empty now, remove it too
+        try:
+            decision_root.rmdir()
+            ui.log_main("Removed empty decision folder.")
+        except OSError:
+            pass
+
     print("\nAll groups processed. 🎉")
     return 0
 

@@ -686,6 +686,37 @@ def attach_flask_logger(app: Flask, ui) -> None:
 
     logger.addHandler(UILogHandler())
 
+    # ALSO: Werkzeug prints some startup warnings via its internal _log (not logging)
+    # Patch it so it doesn't blast the terminal and mess with Rich's Live screen.
+    try:
+        import werkzeug.serving as ws
+
+        orig_log = getattr(ws, "_log", None)
+
+        def patched_log(log_type, message, *args):
+            # format like werkzeug does
+            try:
+                msg = message % args if args else str(message)
+            except Exception:
+                msg = f"{message} {' '.join(map(str, args))}"
+
+            # silence only the annoying dev-server warning
+            if "This is a development server" in msg:
+                return
+
+            try:
+                ui.log_flask(msg)
+            except Exception:
+                # fallback to original behavior if UI logging fails
+                if orig_log:
+                    orig_log(log_type, message, *args)
+
+        if orig_log:
+            ws._log = patched_log  # type: ignore
+    except Exception:
+        # If Werkzeug internals change, don't crash the program.
+        pass
+
 
 def serve_review_ui(
     server: ReviewServer,
