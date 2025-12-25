@@ -39,9 +39,11 @@ class ReviewServer:
 
         self._lock = threading.Lock()
         self._group_dir: Optional[Path] = None
-        self._finished_once = False
         self._result_ready = threading.Event()
         self._result: Optional[ReviewResult] = None
+
+        # open browser only once per run
+        self._browser_opened = False
 
         self._register_routes()
 
@@ -54,7 +56,6 @@ class ReviewServer:
             return
 
         def run():
-            # Flask dev server is fine for local single-user workflow
             self._app.run(
                 host=self.host,
                 port=self.port,
@@ -65,19 +66,15 @@ class ReviewServer:
 
         self._thread = threading.Thread(target=run, daemon=True)
         self._thread.start()
-
-        # Wait a moment so it's actually listening
-        time.sleep(0.4)
+        time.sleep(0.35)
 
     def set_group(self, group_dir: Path) -> None:
         group_dir = group_dir.resolve()
         with self._lock:
             self._group_dir = group_dir
-            self._finished_once = False
             self._result = None
             self._result_ready.clear()
 
-            # Initialize state file if missing
             state = self._load_state_locked()
             if state is None:
                 self._save_state_locked({"keep": [], "finished_clicks": 0})
@@ -111,14 +108,13 @@ class ReviewServer:
 
     def _list_images_locked(self) -> list[str]:
         assert self._group_dir is not None
-        names = []
+        names: list[str] = []
         for p in sorted(self._group_dir.iterdir()):
             if p.is_file() and p.name.lower() not in {
                 "_manifest.tsv",
                 "_preview.html",
-                STATE_FILENAME,
+                STATE_FILENAME.lower(),
             }:
-                # avoid serving non-images if you want: keep it simple, show whatever files are present
                 names.append(p.name)
         return names
 
@@ -130,7 +126,6 @@ class ReviewServer:
 
         @app.get("/")
         def index():
-            # Single-page UI served inline for simplicity
             return Response(self._page_html(), mimetype="text/html")
 
         @app.get("/api/group")
@@ -176,6 +171,7 @@ class ReviewServer:
 
                 state = self._load_state_locked() or {"keep": [], "finished_clicks": 0}
                 keep = set(state.get("keep", []))
+
                 if name in keep:
                     keep.remove(name)
                 else:
@@ -201,7 +197,6 @@ class ReviewServer:
                         {"ok": True, "confirmed": False, "finished_clicks": clicks}
                     )
 
-                # Double-confirmed: produce result
                 keep_names = set(state.get("keep", []))
                 self._result = ReviewResult(keep_names=keep_names, confirmed=True)
                 self._result_ready.set()
@@ -220,7 +215,6 @@ class ReviewServer:
                 return jsonify({"ok": True})
 
     def _page_html(self) -> str:
-        # Vanilla JS so you don't need any frontend tooling.
         return """
 <!doctype html>
 <html>
@@ -237,10 +231,22 @@ class ReviewServer:
     .danger { border-color: #d55; }
     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
     .card { border: 1px solid #ddd; border-radius: 12px; padding: 10px; }
-    .name { font-size: 12px; color: #333; margin-bottom: 8px; word-break: break-all; }
+    .nameRow { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .name {
+      font-size: 12px; color: #333; word-break: break-all;
+      user-select: text; cursor: text;
+    }
+    .copyBtn { padding: 6px 10px; border-radius: 10px; font-size: 12px; }
     img { width: 100%; height: auto; border-radius: 10px; }
     .keep { outline: 4px solid #2ecc71; }
     .hint { color: #666; font-size: 13px; margin: 8px 0 14px; }
+    .toast {
+      position: fixed; right: 16px; bottom: 16px;
+      background: #222; color: #fff; padding: 10px 12px; border-radius: 10px;
+      opacity: 0; transform: translateY(8px); transition: opacity 120ms, transform 120ms;
+      font-size: 13px; pointer-events: none;
+    }
+    .toast.show { opacity: 0.92; transform: translateY(0); }
   </style>
 </head>
 <body>
@@ -258,6 +264,7 @@ class ReviewServer:
   </div>
 
   <div class="grid" id="grid"></div>
+  <div class="toast" id="toast"></div>
 
 <script>
 async function getJSON(url) {
@@ -274,60 +281,182 @@ async function postJSON(url, body) {
   return await r.json();
 }
 
+const GRID = document.getElementById("grid");
+const STATUS = document.getElementById("status");
+const FINISHED = document.getElementById("finishedClicks");
+const TOAST = document.getElementById("toast");
+
+// state
 let KEEP = new Set();
 let IMAGES = [];
+let lastGroupDir = null;
+let lastImagesKey = "";
+let lastKeepKey = "";
+let lastFinished = -1;
 
-function render() {
-  const grid = document.getElementById("grid");
-  grid.innerHTML = "";
-  for (const name of IMAGES) {
-    const card = document.createElement("div");
-    card.className = "card";
+// DOM cache: name -> {card, img}
+const cards = new Map();
 
-    const label = document.createElement("div");
-    label.className = "name";
-    label.textContent = name;
+function toast(msg) {
+  // not an alert; small non-blocking blip
+  TOAST.textContent = msg;
+  TOAST.classList.add("show");
+  setTimeout(() => TOAST.classList.remove("show"), 900);
+}
 
-    const img = document.createElement("img");
-    img.src = "/files/" + encodeURIComponent(name);
-    img.loading = "lazy";
-    img.className = KEEP.has(name) ? "keep" : "";
+function mkCard(name) {
+  const card = document.createElement("div");
+  card.className = "card";
 
-    img.onclick = async () => {
-      const res = await postJSON("/api/toggle_keep", {name});
-      if (res.ok) {
-        KEEP = new Set(res.keep || []);
-        render();
-      } else {
-        alert(res.error || "Toggle failed");
-      }
-    };
+  const row = document.createElement("div");
+  row.className = "nameRow";
 
-    card.appendChild(label);
-    card.appendChild(img);
-    grid.appendChild(card);
+  const label = document.createElement("div");
+  label.className = "name";
+  label.textContent = name;
+
+  const btn = document.createElement("button");
+  btn.className = "copyBtn";
+  btn.textContent = "Copy";
+  btn.onclick = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(name);
+      toast("Copied filename");
+    } catch {
+      // fallback if clipboard blocked
+      const ta = document.createElement("textarea");
+      ta.value = name;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      toast("Copied filename");
+    }
+  };
+
+  row.appendChild(label);
+  row.appendChild(btn);
+
+  const img = document.createElement("img");
+  img.src = "/files/" + encodeURIComponent(name);
+  img.loading = "lazy";
+  img.className = KEEP.has(name) ? "keep" : "";
+  img.onclick = async () => {
+    const res = await postJSON("/api/toggle_keep", {name});
+    if (res.ok) {
+      KEEP = new Set(res.keep || []);
+      // only update classes, don't nuke the DOM
+      updateKeepClasses();
+    } else {
+      toast(res.error || "Toggle failed");
+    }
+  };
+
+  card.appendChild(row);
+  card.appendChild(img);
+
+  return {card, img};
+}
+
+function imagesKey(images) {
+  // stable compare (order-insensitive)
+  return [...images].sort().join("\n");
+}
+
+function keepKey(keep) {
+  return [...keep].sort().join("\n");
+}
+
+function reconcileGrid() {
+  const want = new Set(IMAGES);
+
+  // remove cards not present anymore
+  for (const [name, obj] of cards.entries()) {
+    if (!want.has(name)) {
+      obj.card.remove();
+      cards.delete(name);
+    }
+  }
+
+  // add missing cards
+  // to keep ordering stable, rebuild ordering by appending in sorted order,
+  // but only moving nodes if needed.
+  const ordered = [...IMAGES];
+  for (const name of ordered) {
+    if (!cards.has(name)) {
+      const obj = mkCard(name);
+      cards.set(name, obj);
+    }
+  }
+
+  // ensure DOM order matches IMAGES
+  for (const name of ordered) {
+    GRID.appendChild(cards.get(name).card);
+    // appending an existing node just moves it; cheap enough
+  }
+
+  updateKeepClasses();
+}
+
+function updateKeepClasses() {
+  for (const [name, obj] of cards.entries()) {
+    if (KEEP.has(name)) obj.img.classList.add("keep");
+    else obj.img.classList.remove("keep");
   }
 }
 
 async function refresh() {
   const data = await getJSON("/api/group");
-  const status = document.getElementById("status");
-  const finishedClicks = document.getElementById("finishedClicks");
 
   if (!data.active) {
-    status.textContent = "No active group yet (script is preparing one)...";
-    finishedClicks.textContent = "Finished clicks: 0/2";
+    STATUS.textContent = "No active group yet (script is preparing one)...";
+    FINISHED.textContent = "Finished clicks: 0/2";
     IMAGES = [];
     KEEP = new Set();
-    render();
+    lastGroupDir = null;
+    lastImagesKey = "";
+    lastKeepKey = "";
+    lastFinished = -1;
+
+    // clear grid once (not every tick)
+    if (cards.size > 0) {
+      for (const [, obj] of cards.entries()) obj.card.remove();
+      cards.clear();
+    }
     return;
   }
 
-  status.textContent = "Active group: " + data.group_dir;
-  IMAGES = data.images || [];
-  KEEP = new Set(data.keep || []);
-  finishedClicks.textContent = "Finished clicks: " + (data.finished_clicks || 0) + "/2";
-  render();
+  const groupDir = data.group_dir;
+  const images = data.images || [];
+  const keep = new Set(data.keep || []);
+  const finishedClicks = data.finished_clicks || 0;
+
+  STATUS.textContent = "Active group: " + groupDir;
+  FINISHED.textContent = "Finished clicks: " + finishedClicks + "/2";
+
+  const newImagesKey = imagesKey(images);
+  const newKeepKey = keepKey(keep);
+
+  // If group changed, we rebuild only what we need (diff-based anyway)
+  const groupChanged = (lastGroupDir !== groupDir);
+
+  // Update state
+  IMAGES = images;
+  KEEP = keep;
+
+  // Only touch the DOM if necessary
+  if (groupChanged || newImagesKey !== lastImagesKey) {
+    reconcileGrid();
+  } else if (newKeepKey !== lastKeepKey) {
+    updateKeepClasses();
+  }
+
+  lastGroupDir = groupDir;
+  lastImagesKey = newImagesKey;
+  lastKeepKey = newKeepKey;
+  lastFinished = finishedClicks;
 }
 
 document.getElementById("btnRefresh").onclick = refresh;
@@ -338,17 +467,13 @@ document.getElementById("btnReset").onclick = async () => {
 };
 
 document.getElementById("btnFinished").onclick = async () => {
-  const res = await postJSON("/api/finished", {});
+  // No alerts. The pill is the UI.
+  await postJSON("/api/finished", {});
   await refresh();
-  if (res.confirmed) {
-    alert("Confirmed! You can leave this tab open; the script will move on automatically.");
-  } else {
-    alert("Press Finished one more time to confirm deletion of unselected files.");
-  }
 };
 
 // auto refresh occasionally
-setInterval(refresh, 1500);
+setInterval(refresh, 1000);
 refresh();
 </script>
 </body>
@@ -359,19 +484,13 @@ refresh();
 def serve_review_ui(
     server: ReviewServer, group_dir: Path, open_browser: bool = True
 ) -> ReviewResult:
-    """
-    Convenience wrapper:
-      - ensures server is running
-      - sets the active group
-      - optionally opens browser
-      - waits for double-confirm finish result
-    """
     server.start()
     server.set_group(group_dir)
 
-    if open_browser:
+    if open_browser and (not server._browser_opened):
         import webbrowser
 
         webbrowser.open(server.base_url)
+        server._browser_opened = True
 
     return server.wait_result()
