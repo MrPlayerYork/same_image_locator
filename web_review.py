@@ -4,6 +4,8 @@ import json
 import threading
 import time
 import mimetypes
+import logging
+import flask.cli
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -48,6 +50,9 @@ class ReviewServer:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+
+        flask.cli.show_server_banner = lambda *args, **kwargs: None
+        logging.getLogger("werkzeug").setLevel(logging.INFO)
 
         def run():
             self._app.run(
@@ -663,6 +668,23 @@ refresh();
 </body>
 </html>
 """
+
+
+def attach_flask_logger(app: Flask, ui) -> None:
+    # Route werkzeug logs to ui.log_flask
+    logger = logging.getLogger("werkzeug")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.propagate = False
+
+    class UILogHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                ui.log_flask(record.getMessage())
+            except Exception:
+                pass
+
+    logger.addHandler(UILogHandler())
 
 
 def serve_review_ui(

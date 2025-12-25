@@ -7,6 +7,8 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from rich.live import Live
+from ui_console import UISplit
 
 from web_review import ReviewServer, serve_review_ui
 
@@ -162,7 +164,9 @@ def copy_with_retry(
     shutil.copy2(src, dst)  # last try
 
 
-def restore_selected_and_delete_rest(group_dir: Path, keep_names: set[str]) -> None:
+def restore_selected_and_delete_rest(
+    group_dir: Path, keep_names: set[str], _render: UISplit
+) -> None:
     mapping = read_manifest(group_dir)
 
     present = [
@@ -181,7 +185,7 @@ def restore_selected_and_delete_rest(group_dir: Path, keep_names: set[str]) -> N
                     moved_path.rename(pending)
                     delete_with_retry(pending)
                 except Exception:
-                    print(f"⚠️ Could not delete (locked): {moved_path}")
+                    _render.log_main(f"⚠️ Could not delete (locked): {moved_path}")
             continue
 
         original = mapping.get(moved_path)
@@ -208,13 +212,13 @@ def restore_selected_and_delete_rest(group_dir: Path, keep_names: set[str]) -> N
             stuck = moved_path.with_name(moved_path.name + ".stuck")
             try:
                 moved_path.rename(stuck)
-                print(f"⚠️ Source locked, left behind as: {stuck}")
+                _render.log_main(f"⚠️ Source locked, left behind as: {stuck}")
             except Exception:
-                print(f"⚠️ Source locked and couldn't rename: {moved_path}")
+                _render.log_main(f"⚠️ Source locked and couldn't rename: {moved_path}")
 
 
 def stage_all_groups_into_decision_folder(
-    groups: list[DupeGroup], decision_root: Path, dry_run: bool
+    groups: list[DupeGroup], decision_root: Path, dry_run: bool, _render: UISplit
 ) -> list[Path]:
     """
     Moves ALL groups into decision folders first, writes manifests.
@@ -230,7 +234,7 @@ def stage_all_groups_into_decision_folder(
             continue
 
         if dry_run:
-            print(f"(dry-run) Would stage group into: {group_dir}")
+            _render.log_main(f"(dry-run) Would stage group into: {group_dir}")
             continue
 
         group_dir.mkdir(parents=True, exist_ok=False)
@@ -263,49 +267,57 @@ def main() -> int:
     root = args.root.expanduser().resolve()
     decision_root = args.decision_folder.expanduser().resolve()
 
-    if not root.exists():
-        print(f"Root does not exist: {root}")
-        return 2
+    ui = UISplit()
+    with Live(ui.layout, console=ui.console, refresh_per_second=10, screen=True):
+        if not root.exists():
+            ui.log_main(f"Root does not exist: {root}")
+            return 2
 
-    files = list(iter_files(root, include_all=args.include_all))
-    print(f"Scanned: {len(files)} files under {root}")
+        files = list(iter_files(root, include_all=args.include_all))
+        ui.log_main(f"Scanned: {len(files)} files under {root}")
 
-    groups = find_exact_groups(files)
-    print(f"Exact duplicate groups found: {len(groups)}")
-    if not groups:
-        return 0
+        groups = find_exact_groups(files)
+        ui.log_main(f"Exact duplicate groups found: {len(groups)}")
+        if not groups:
+            return 0
 
-    decision_root.mkdir(parents=True, exist_ok=True)
-    print(f"Decision folder: {decision_root}")
+        decision_root.mkdir(parents=True, exist_ok=True)
+        ui.log_main(f"Decision folder: {decision_root}")
 
-    print("\nStaging all groups into the decision folder...")
-    group_dirs = stage_all_groups_into_decision_folder(
-        groups, decision_root, dry_run=args.dry_run
-    )
-
-    if args.dry_run:
-        print("\nDry-run complete.")
-        return 0
-
-    print(f"Staged groups ready to review: {len(group_dirs)}")
-
-    server = ReviewServer(host=args.host, port=args.port)
-
-    for idx, group_dir in enumerate(group_dirs, 1):
-        if not (group_dir / MANIFEST_NAME).exists():
-            print(f"Skipping (no manifest): {group_dir}")
-            continue
-
-        print("\n" + "=" * 72)
-        print(f"Review {idx}/{len(group_dirs)}: {group_dir.name}")
-        result = serve_review_ui(
-            server, group_dir, open_browser=(not args.no_open), mode="exact"
+        ui.log_main("\nStaging all groups into the decision folder...")
+        group_dirs = stage_all_groups_into_decision_folder(
+            groups, decision_root, dry_run=args.dry_run, _render=ui
         )
 
-        restore_selected_and_delete_rest(group_dir, result.keep_names)
-        if not rmtree_with_retry(group_dir):
-            print(f"⚠️ Could not remove group folder (still locked): {group_dir}")
-        print("Applied selection. Next group...")
+        if args.dry_run:
+            ui.log_main("\nDry-run complete.")
+            return 0
+
+        ui.log_main(f"Staged groups ready to review: {len(group_dirs)}")
+
+        server = ReviewServer(host=args.host, port=args.port)
+
+        from web_review import attach_flask_logger
+
+        attach_flask_logger(server._app, ui)
+
+        for idx, group_dir in enumerate(group_dirs, 1):
+            if not (group_dir / MANIFEST_NAME).exists():
+                ui.log_main(f"Skipping (no manifest): {group_dir}")
+                continue
+
+            ui.log_main("\n" + "=" * 72)
+            ui.log_main(f"Review {idx}/{len(group_dirs)}: {group_dir.name}")
+            result = serve_review_ui(
+                server, group_dir, open_browser=(not args.no_open), mode="exact"
+            )
+
+            restore_selected_and_delete_rest(group_dir, result.keep_names, _render=ui)
+            if not rmtree_with_retry(group_dir):
+                ui.log_main(
+                    f"⚠️ Could not remove group folder (still locked): {group_dir}"
+                )
+            ui.log_main("Applied selection. Next group...")
 
     print("\nAll groups processed. 🎉")
     return 0
