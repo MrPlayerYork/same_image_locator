@@ -99,7 +99,7 @@ function mkCard(item) {
         });
         if (res.ok) {
             KEEP = new Set(res.keep || []);
-            PREFERRED_FOLDER = res.preferred || null;
+            PREFERRED_FOLDER = res.preferred_folder || null;
 
             updateKeepClasses();
             updatePreferredUI();
