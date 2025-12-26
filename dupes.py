@@ -251,6 +251,14 @@ def stage_all_groups_into_decision_folder(
     return created
 
 
+def find_pending_group_dirs(decision_root: Path) -> list[Path]:
+    if not decision_root.exists():
+        return []
+    group_dirs = [p for p in decision_root.glob("group_*") if p.is_dir()]
+    # sort by name so group_0001, group_0002...
+    return sorted(group_dirs, key=lambda p: p.name)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Stage all exact dupes, then review via local Flask UI."
@@ -273,21 +281,29 @@ def main() -> int:
             ui.log_main(f"Root does not exist: {root}")
             return 2
 
-        files = list(iter_files(root, include_all=args.include_all))
-        ui.log_main(f"Scanned: {len(files)} files under {root}")
-
-        groups = find_exact_groups(files)
-        ui.log_main(f"Exact duplicate groups found: {len(groups)}")
-        if not groups:
-            return 0
-
         decision_root.mkdir(parents=True, exist_ok=True)
         ui.log_main(f"Decision folder: {decision_root}")
 
-        ui.log_main("\nStaging all groups into the decision folder...")
-        group_dirs = stage_all_groups_into_decision_folder(
-            groups, decision_root, dry_run=args.dry_run, _render=ui
-        )
+        pending = find_pending_group_dirs(decision_root)
+        if pending:
+            ui.log_main(
+                f"⚠️ Found {len(pending)} existing group folder(s) in {decision_root}."
+            )
+            ui.log_main("Resuming review from decision folder (skipping rescan/hash).")
+            group_dirs = pending
+        else:
+            files = list(iter_files(root, include_all=args.include_all))
+            ui.log_main(f"Scanned: {len(files)} files under {root}")
+
+            groups = find_exact_groups(files)
+            ui.log_main(f"Exact duplicate groups found: {len(groups)}")
+            if not groups:
+                return 0
+
+            ui.log_main("\nStaging all groups into the decision folder...")
+            group_dirs = stage_all_groups_into_decision_folder(
+                groups, decision_root, dry_run=args.dry_run, _render=ui
+            )
 
         if args.dry_run:
             ui.log_main("\nDry-run complete.")

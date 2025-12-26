@@ -295,6 +295,22 @@ class ReviewServer:
             data = request.get_json(force=True, silent=True) or {}
             folder_path = str(data.get("folder_path", ""))
 
+            state = self._load_state_locked() or {}
+            current = state.get("preferred_folder")
+
+            # toggle off if clicked again
+            if current == folder_path:
+                state["preferred_folder"] = None
+                # do not change keep; just untoggle preference
+                self._save_state_locked(state)
+                return jsonify(
+                    {
+                        "ok": True,
+                        "preferred_folder": None,
+                        "keep": state.get("keep", []),
+                    }
+                )
+
             with self._lock:
                 if self._group_dir is None:
                     return jsonify({"ok": False, "error": "No active group"}), 400
@@ -395,6 +411,8 @@ class ReviewServer:
     img { width: 100%; height: auto; border-radius: 10px; }
     .keep { outline: 4px solid #2ecc71; }
     .hint { color: #666; font-size: 13px; margin: 8px 0 14px; }
+    .card.preferred {outline: 3px solid #2ecc71}
+    .preferBtn.on { background: #2ecc71; color: white; font-weight: 700}
   </style>
 </head>
 <body>
@@ -441,6 +459,7 @@ let ITEMS = []; // {name, folder_name, folder_path}
 let MODE = "exact";
 let AUTO_FINISH = false;
 let finishedClicks = 0;
+let PREFERRED_FOLDER = null;
 
 let lastKeyItems = "";
 let lastKeyKeep = "";
@@ -495,15 +514,33 @@ function mkCard(item) {
   const preferBtn = document.createElement("button");
   preferBtn.className = "preferBtn";
   preferBtn.textContent = "Prefer this folder";
+
+  function updatePreferredUI() {
+    const isPref =
+      PREFERRED_FOLDER && item.folder_path === PREFERRED_FOLDER;
+
+    card.classList.toggle("preferred", isPref);
+    preferBtn.classList.toggle("on", isPref);
+    preferBtn.textContent = isPref
+      ? "Preferred ✅"
+      : "Prefer this folder";
+  }
+
   preferBtn.onclick = async (e) => {
-    e.preventDefault(); e.stopPropagation();
-    if (!item.folder_path) return;
-    const res = await postJSON("/api/prefer_folder", { folder_path: item.folder_path });
+    e.preventDefault();
+    e.stopPropagation();
+
+    const res = await postJSON("/api/prefer_folder", {
+      folder_path: item.folder_path,
+    });
     if (res.ok) {
       KEEP = new Set(res.keep || []);
+      PREFERRED_FOLDER = res.preferred || null;
+
       updateKeepClasses();
+      updatePreferredUI();
       await maybeAutoFinish();
-      // Don't auto finish here.
+      // Don't auto finish
     }
   };
 
@@ -524,6 +561,8 @@ function mkCard(item) {
   card.appendChild(row);
   card.appendChild(sub);
   card.appendChild(img);
+
+  updatePreferredUI();
 
   return {card, img};
 }
@@ -586,6 +625,7 @@ async function refresh() {
     KEEP = new Set();
     MODE = "exact";
     AUTO_FINISH = false;
+    PREFERRED_FOLDER = data.preferred_folder || null;
     finishedClicks = 0;
     lastKeyItems = "";
     lastKeyKeep = "";
