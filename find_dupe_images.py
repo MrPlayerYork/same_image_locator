@@ -8,9 +8,9 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from rich.live import Live
-from ui_console import UISplit
+from modules.ui_console import UISplit
 
-from web_review import ReviewServer, serve_review_ui
+from modules.web_review import ReviewServer, serve_review_ui
 
 IMG_EXTS = {
     ".jpg",
@@ -313,7 +313,7 @@ def main() -> int:
 
         server = ReviewServer(host=args.host, port=args.port)
 
-        from web_review import attach_flask_logger
+        from modules.web_review import attach_flask_logger
 
         attach_flask_logger(server._app, ui)
 
