@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Duplicate Review</title>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script defer src="{{ url_for('static', filename='app.js') }}"></script>
+</head>
+
+<body>
+    <h2>Dupe Reviewer</h2>
+    <div class="hint">
+        Click images to mark <b>KEEP</b>. Click <b>Finished</b> twice to confirm.
+        <span id="autoHint"></span>
+    </div>
+
+    <div class="topbar">
+        <div class="pill" id="status">Loading...</div>
+        <div class="pill" id="finishedClicks">Finished clicks: 0/2</div>
+        <button id="btnAutoFinish">Auto-finish: OFF</button>
+        <button id="btnFinished" class="danger">Finished (double confirm)</button>
+        <button id="btnReset">Reset Finished</button>
+        <button id="btnRefresh">Refresh</button>
+    </div>
+
+    <div class="grid" id="grid"></div>
+</body>
+
+</html>

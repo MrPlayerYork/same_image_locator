@@ -1,0 +1,118 @@
+body {
+    font-family: system-ui, Segoe UI, Arial;
+    margin: 16px;
+}
+
+h2 {
+    margin: 0 0 10px;
+}
+
+.topbar {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.pill {
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: #f2f2f2;
+    font-size: 12px;
+}
+
+button {
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid #ccc;
+    background: #fff;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #f7f7f7;
+}
+
+.danger {
+    border-color: #d55;
+}
+
+.toggleOn {
+    border-color: #2ecc71;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 14px;
+}
+
+.card {
+    border: 1px solid #ddd;
+    border-radius: 12px;
+    padding: 10px;
+}
+
+.nameRow {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
+.name {
+    font-size: 12px;
+    color: #333;
+    word-break: break-all;
+    user-select: text;
+    cursor: text;
+}
+
+.subRow {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.folder {
+    font-size: 12px;
+    color: #666;
+    user-select: text;
+}
+
+.copyBtn,
+.preferBtn {
+    padding: 6px 10px;
+    border-radius: 10px;
+    font-size: 12px;
+}
+
+img {
+    width: 100%;
+    height: auto;
+    border-radius: 10px;
+}
+
+.keep {
+    outline: 4px solid #2ecc71;
+}
+
+.hint {
+    color: #666;
+    font-size: 13px;
+    margin: 8px 0 14px;
+}
+
+.card.preferred {
+    outline: 3px solid #2ecc71
+}
+
+.preferBtn.on {
+    background: #2ecc71;
+    color: white;
+    font-weight: 700
+}
