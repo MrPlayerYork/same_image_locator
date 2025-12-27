@@ -14,6 +14,7 @@ from flask import Flask, jsonify, request, Response, render_template
 
 STATE_FILENAME = "_review_state.json"
 MANIFEST_NAME = "_manifest.tsv"
+GROUP_META_NAME = "_group_meta.json"
 
 
 @dataclass
@@ -32,7 +33,7 @@ class ReviewServer:
 
         self._lock = threading.Lock()
         self._group_dir: Optional[Path] = None
-        self._mode: str = "exact"  # "exact" or later "phash"
+        self._mode: str = "exact"  # "exact", "ahash", or "phash"
         self._result_ready = threading.Event()
         self._result: Optional[ReviewResult] = None
 
@@ -101,7 +102,10 @@ class ReviewServer:
         group_dir = group_dir.resolve()
         with self._lock:
             self._group_dir = group_dir
-            self._mode = mode
+            safe_mode = (mode or "exact").lower()
+            if safe_mode not in {"exact", "ahash", "phash"}:
+                safe_mode = "exact"
+            self._mode = safe_mode
             self._result = None
             self._result_ready.clear()
 
@@ -115,10 +119,12 @@ class ReviewServer:
                         "preferred_folder": None,
                     }
                 )
-            # ✅ apply remembered preferences across groups
+            # apply remembered preferences across groups
             self._apply_global_folder_preference_locked()
             state = self._load_state_locked() or {}
-            state["auto_finish"] = bool(self._auto_finish_global)
+            state["auto_finish"] = (
+                bool(self._auto_finish_global) if self._mode == "exact" else False
+            )
             self._save_state_locked(state)
 
     def wait_result(self) -> ReviewResult:
@@ -181,6 +187,7 @@ class ReviewServer:
             if p.name.lower() in {
                 MANIFEST_NAME.lower(),
                 STATE_FILENAME.lower(),
+                GROUP_META_NAME.lower(),
                 "_preview.html",
             }:
                 continue
@@ -221,6 +228,9 @@ class ReviewServer:
 
                 items = self._list_items_locked()
                 state = self._load_state_locked() or {}
+                auto_finish = bool(state.get("auto_finish", False))
+                if self._mode != "exact":
+                    auto_finish = False
                 return jsonify(
                     {
                         "active": True,
@@ -229,7 +239,7 @@ class ReviewServer:
                         "items": items,
                         "keep": state.get("keep", []),
                         "finished_clicks": state.get("finished_clicks", 0),
-                        "auto_finish": bool(self._auto_finish_global),
+                        "auto_finish": auto_finish,
                         "preferred_folder": state.get("preferred_folder", None),
                     }
                 )
@@ -323,7 +333,7 @@ class ReviewServer:
                 state = self._load_state_locked() or {}
                 state["keep"] = sorted(set(keep))
                 state["preferred_folder"] = folder_path
-                # ✅ record global preference (most recent first)
+                # record global preference (most recent first)
                 if folder_path:
                     self._preferred_folder_order = [folder_path] + [
                         fp for fp in self._preferred_folder_order if fp != folder_path
@@ -339,6 +349,20 @@ class ReviewServer:
             with self._lock:
                 if self._group_dir is None:
                     return jsonify({"ok": False, "error": "No active group"}), 400
+
+                if self._mode != "exact":
+                    state = self._load_state_locked() or {}
+                    state["auto_finish"] = False
+                    self._save_state_locked(state)
+                    return (
+                        jsonify(
+                            {
+                                "ok": False,
+                                "error": "Auto-finish is only available in exact mode.",
+                            }
+                        ),
+                        400,
+                    )
 
                 self._auto_finish_global = not bool(self._auto_finish_global)
 
@@ -381,335 +405,6 @@ class ReviewServer:
                 state["finished_clicks"] = 0
                 self._save_state_locked(state)
                 return jsonify({"ok": True})
-
-    # ---------------------------
-    # UI
-    # ---------------------------
-
-
-#     def _page_html(self) -> str:
-#         return """
-# <!doctype html>
-# <html>
-# <head>
-#   <meta charset="utf-8"/>
-#   <title>Dupe Reviewer</title>
-#   <style>
-#     body { font-family: system-ui, Segoe UI, Arial; margin: 16px; }
-#     h2 { margin: 0 0 10px; }
-#     .topbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-#     .pill { padding: 6px 10px; border-radius: 999px; background: #f2f2f2; font-size: 12px; }
-#     button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
-#     button:hover { background: #f7f7f7; }
-#     .danger { border-color: #d55; }
-#     .toggleOn { border-color: #2ecc71; }
-#     .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
-#     .card { border: 1px solid #ddd; border-radius: 12px; padding: 10px; }
-#     .nameRow { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-#     .name { font-size: 12px; color: #333; word-break: break-all; user-select: text; cursor: text; }
-#     .subRow { display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-#     .folder { font-size: 12px; color: #666; user-select: text; }
-#     .copyBtn, .preferBtn { padding: 6px 10px; border-radius: 10px; font-size: 12px; }
-#     img { width: 100%; height: auto; border-radius: 10px; }
-#     .keep { outline: 4px solid #2ecc71; }
-#     .hint { color: #666; font-size: 13px; margin: 8px 0 14px; }
-#     .card.preferred {outline: 3px solid #2ecc71}
-#     .preferBtn.on { background: #2ecc71; color: white; font-weight: 700}
-#   </style>
-# </head>
-# <body>
-#   <h2>Dupe Reviewer</h2>
-#   <div class="hint">
-#     Click images to mark <b>KEEP</b>. Click <b>Finished</b> twice to confirm.
-#     <span id="autoHint"></span>
-#   </div>
-
-#   <div class="topbar">
-#     <div class="pill" id="status">Loading...</div>
-#     <div class="pill" id="finishedClicks">Finished clicks: 0/2</div>
-#     <button id="btnAutoFinish">Auto-finish: OFF</button>
-#     <button id="btnFinished" class="danger">Finished (double confirm)</button>
-#     <button id="btnReset">Reset Finished</button>
-#     <button id="btnRefresh">Refresh</button>
-#   </div>
-
-#   <div class="grid" id="grid"></div>
-
-# <script>
-# async function getJSON(url) {
-#   const r = await fetch(url);
-#   return await r.json();
-# }
-# async function postJSON(url, body) {
-#   const r = await fetch(url, {
-#     method: "POST",
-#     headers: { "Content-Type": "application/json" },
-#     body: JSON.stringify(body || {})
-#   });
-#   return await r.json();
-# }
-
-# const GRID = document.getElementById("grid");
-# const STATUS = document.getElementById("status");
-# const FINISHED = document.getElementById("finishedClicks");
-# const BTN_AUTOFIN = document.getElementById("btnAutoFinish");
-# const AUTOHINT = document.getElementById("autoHint");
-
-# // state
-# let KEEP = new Set();
-# let ITEMS = []; // {name, folder_name, folder_path}
-# let MODE = "exact";
-# let AUTO_FINISH = false;
-# let finishedClicks = 0;
-# let PREFERRED_FOLDER = null;
-
-# let lastKeyItems = "";
-# let lastKeyKeep = "";
-
-# // DOM cache
-# const cards = new Map();
-
-# function itemsKey(items) {
-#   // stable compare for diffing
-#   return items.map(it => it.name + "|" + (it.folder_path || "")).sort().join("\\n");
-# }
-# function keepKey(setKeep) {
-#   return [...setKeep].sort().join("\\n");
-# }
-
-# function updateKeepClasses() {
-#   for (const [name, obj] of cards.entries()) {
-#     if (KEEP.has(name)) obj.img.classList.add("keep");
-#     else obj.img.classList.remove("keep");
-#   }
-# }
-
-# function mkCard(item) {
-#   const card = document.createElement("div");
-#   card.className = "card";
-
-#   const row = document.createElement("div");
-#   row.className = "nameRow";
-
-#   const label = document.createElement("div");
-#   label.className = "name";
-#   label.textContent = item.name;
-
-#   const copyBtn = document.createElement("button");
-#   copyBtn.className = "copyBtn";
-#   copyBtn.textContent = "Copy";
-#   copyBtn.onclick = async (e) => {
-#     e.preventDefault(); e.stopPropagation();
-#     try { await navigator.clipboard.writeText(item.name); } catch {}
-#   };
-
-#   row.appendChild(label);
-#   row.appendChild(copyBtn);
-
-#   const sub = document.createElement("div");
-#   sub.className = "subRow";
-
-#   const folder = document.createElement("div");
-#   folder.className = "folder";
-#   folder.textContent = item.folder_name ? ("📁 " + item.folder_name) : "📁 unknown";
-
-#   const preferBtn = document.createElement("button");
-#   preferBtn.className = "preferBtn";
-#   preferBtn.textContent = "Prefer this folder";
-
-#   function updatePreferredUI() {
-#     const isPref =
-#       PREFERRED_FOLDER && item.folder_path === PREFERRED_FOLDER;
-
-#     card.classList.toggle("preferred", isPref);
-#     preferBtn.classList.toggle("on", isPref);
-#     preferBtn.textContent = isPref
-#       ? "Preferred ✅"
-#       : "Prefer this folder";
-#   }
-
-#   preferBtn.onclick = async (e) => {
-#     e.preventDefault();
-#     e.stopPropagation();
-
-#     const res = await postJSON("/api/prefer_folder", {
-#       folder_path: item.folder_path,
-#     });
-#     if (res.ok) {
-#       KEEP = new Set(res.keep || []);
-#       PREFERRED_FOLDER = res.preferred || null;
-
-#       updateKeepClasses();
-#       updatePreferredUI();
-#       await maybeAutoFinish();
-#       // Don't auto finish
-#     }
-#   };
-
-#   sub.appendChild(folder);
-#   sub.appendChild(preferBtn);
-
-#   const img = document.createElement("img");
-#   img.src = "/files/" + encodeURIComponent(item.name);
-#   img.loading = "lazy";
-#   img.onclick = async () => {
-#     const res = await postJSON("/api/toggle_keep", {name: item.name});
-#     if (res.ok) {
-#       KEEP = new Set(res.keep || []);
-#       updateKeepClasses();
-#     }
-#   };
-
-#   card.appendChild(row);
-#   card.appendChild(sub);
-#   card.appendChild(img);
-
-#   updatePreferredUI();
-
-#   return {card, img};
-# }
-
-# function reconcileGrid() {
-#   const wantNames = new Set(ITEMS.map(it => it.name));
-
-#   // remove missing
-#   for (const [name, obj] of cards.entries()) {
-#     if (!wantNames.has(name)) {
-#       obj.card.remove();
-#       cards.delete(name);
-#     }
-#   }
-
-#   // add missing
-#   for (const it of ITEMS) {
-#     if (!cards.has(it.name)) {
-#       const obj = mkCard(it);
-#       cards.set(it.name, obj);
-#     }
-#   }
-
-#   // ensure order stable
-#   for (const it of ITEMS) {
-#     GRID.appendChild(cards.get(it.name).card);
-#   }
-
-#   updateKeepClasses();
-# }
-
-# let autoFinishArmed = false;
-# let lastGroupDir = null;
-
-# async function maybeAutoFinish() {
-#   // Only for exact mode, only when toggle enabled
-#   if (MODE !== "exact") return;
-#   if (!AUTO_FINISH) return;
-
-#   // "wait for 1 image to be selected then auto-finish"
-#   if (KEEP.size !== 1) {
-#     autoFinishArmed = true; // arm once user hits 1 later
-#     return;
-#   }
-#   if (!autoFinishArmed) return; // prevents immediate firing on page load if state already has 1
-#   if (finishedClicks >= 2) return;
-
-#   // fire two "finished" clicks
-#   await postJSON("/api/finished", {});
-#   await postJSON("/api/finished", {});
-#   autoFinishArmed = false;
-# }
-
-# async function refresh() {
-#   const data = await getJSON("/api/group");
-#   if (!data.active) {
-#     STATUS.textContent = "No active group yet...";
-#     FINISHED.textContent = "Finished clicks: 0/2";
-#     ITEMS = [];
-#     KEEP = new Set();
-#     MODE = "exact";
-#     AUTO_FINISH = false;
-#     PREFERRED_FOLDER = data.preferred_folder || null;
-#     finishedClicks = 0;
-#     lastKeyItems = "";
-#     lastKeyKeep = "";
-#     if (cards.size > 0) {
-#       for (const [, obj] of cards.entries()) obj.card.remove();
-#       cards.clear();
-#     }
-#     return;
-#   }
-
-#   MODE = data.mode || "exact";
-#   ITEMS = data.items || [];
-#   KEEP = new Set(data.keep || []);
-#   finishedClicks = data.finished_clicks || 0;
-#   AUTO_FINISH = !!data.auto_finish;
-
-#   STATUS.textContent = "Active group: " + data.group_dir + "  (mode: " + MODE + ")";
-#   FINISHED.textContent = "Finished clicks: " + finishedClicks + "/2";
-
-#   const groupChanged = (lastGroupDir !== data.group_dir);
-#   if (groupChanged) {
-#     // New group: allow auto-finish to trigger after the first meaningful selection change.
-#     autoFinishArmed = true;
-#   }
-#   lastGroupDir = data.group_dir;
-
-
-#   // Auto-finish UI
-#   if (MODE !== "exact") {
-#     BTN_AUTOFIN.disabled = true;
-#     BTN_AUTOFIN.textContent = "Auto-finish: N/A";
-#     BTN_AUTOFIN.classList.remove("toggleOn");
-#     AUTOHINT.textContent = "";
-#   } else {
-#     BTN_AUTOFIN.disabled = false;
-#     BTN_AUTOFIN.textContent = "Auto-finish: " + (AUTO_FINISH ? "ON" : "OFF");
-#     BTN_AUTOFIN.classList.toggle("toggleOn", AUTO_FINISH);
-#     AUTOHINT.textContent = AUTO_FINISH ? " (Auto-finish will trigger when exactly 1 is selected.)" : "";
-#   }
-
-#   const kItems = itemsKey(ITEMS);
-#   const kKeep = keepKey(KEEP);
-
-#   if (kItems !== lastKeyItems) {
-#     reconcileGrid();
-#   } else if (kKeep !== lastKeyKeep) {
-#     updateKeepClasses();
-#   }
-
-#   lastKeyItems = kItems;
-#   lastKeyKeep = kKeep;
-
-#   await maybeAutoFinish();
-# }
-
-# document.getElementById("btnRefresh").onclick = refresh;
-# document.getElementById("btnReset").onclick = async () => {
-#   await postJSON("/api/reset_finished", {});
-#   autoFinishArmed = true;
-#   await refresh();
-# };
-# document.getElementById("btnFinished").onclick = async () => {
-#   await postJSON("/api/finished", {});
-#   await refresh();
-# };
-# BTN_AUTOFIN.onclick = async () => {
-#   if (MODE !== "exact") return;
-#   const res = await postJSON("/api/toggle_auto_finish", {});
-#   if (res.ok) {
-#     AUTO_FINISH = !!res.auto_finish;
-#     autoFinishArmed = true; // arm when user toggles
-#     await refresh();
-#   }
-# };
-
-# // poll
-# setInterval(refresh, 900);
-# refresh();
-# </script>
-# </body>
-# </html>
-# """
 
 
 def attach_flask_logger(app: Flask, ui) -> None:

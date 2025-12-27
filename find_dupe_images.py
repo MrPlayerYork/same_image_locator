@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
+import json
+import math
 import shutil
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from rich.live import Live
-from modules.ui_console import UISplit
+from typing import Any, Callable
 
+import numpy as np
+from PIL import Image, ImageOps
+from rich.live import Live
+
+from modules.ui_console import UISplit
 from modules.web_review import ReviewServer, serve_review_ui
 
 IMG_EXTS = {
@@ -25,6 +32,7 @@ IMG_EXTS = {
     ".heif",
 }
 MANIFEST_NAME = "_manifest.tsv"
+GROUP_META_NAME = "_group_meta.json"
 
 
 def iter_files(root: Path, include_all: bool = False):
@@ -53,6 +61,72 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 class DupeGroup:
     digest: str
     files: tuple[Path, ...]
+    mode: str = "exact"
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HashedImage:
+    path: Path
+    value: int
+
+
+def hamming_distance(a: int, b: int) -> int:
+    return int(a ^ b).bit_count()
+
+
+def average_hash_64(path: Path, hash_size: int = 8) -> int:
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img).convert("L")
+        img = img.resize((hash_size, hash_size), Image.Resampling.LANCZOS)
+        pixels = list(img.getdata())  # type: ignore
+
+    avg = sum(pixels) / len(pixels)
+    bits = 0
+    for px in pixels:
+        bits = (bits << 1) | (1 if px >= avg else 0)
+    return bits
+
+
+@functools.lru_cache(maxsize=None)
+def _dct_basis(n: int) -> np.ndarray:
+    """
+    Precompute the DCT-II transform matrix for an n x n block.
+    """
+    x = np.arange(n)
+    mat = np.cos((math.pi / n) * (x[:, None] + 0.5) * x[None, :])
+    mat[0, :] *= 1 / math.sqrt(n)
+    mat[1:, :] *= math.sqrt(2 / n)
+    return mat
+
+
+def _dct_2d(block: np.ndarray) -> np.ndarray:
+    """
+    Lightweight 2D DCT-II using a precomputed basis matrix.
+    """
+    n, m = block.shape
+    if n != m:
+        raise ValueError("DCT block must be square")
+    basis = _dct_basis(n)
+    return basis @ block @ basis.T
+
+
+def phash_64(path: Path, hash_size: int = 8, highfreq_factor: int = 4) -> int:
+    dim = hash_size * highfreq_factor
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img).convert("L")
+        img = img.resize((dim, dim), Image.Resampling.LANCZOS)
+        block = np.asarray(img, dtype=float)
+
+    dct = _dct_2d(block)
+    low_freq = dct[1 : hash_size + 1, 1 : hash_size + 1]
+    flat = low_freq.flatten()
+    avg = flat.mean()
+
+    bits = 0
+    for val in flat:
+        bits = (bits << 1) | (1 if val >= avg else 0)
+    return bits
 
 
 def find_exact_groups(files: list[Path]) -> list[DupeGroup]:
@@ -75,10 +149,76 @@ def find_exact_groups(files: list[Path]) -> list[DupeGroup]:
                 continue
 
     groups = [
-        DupeGroup(digest=k, files=tuple(sorted(v)))
+        DupeGroup(digest=k, files=tuple(sorted(v)), mode="exact")
         for k, v in by_hash.items()
         if len(v) > 1
     ]
+    groups.sort(key=lambda g: (-len(g.files), g.digest))
+    return groups
+
+
+def _hash_file_safe(
+    path: Path,
+    fn: Callable[[Path], int],
+    _render: UISplit,
+) -> int | None:
+    try:
+        return fn(path)
+    except Exception as exc:
+        _render.log_main(f"?? Skipping (cannot hash): {path} ({exc})")
+        return None
+
+
+def _perceptual_groups(
+    files: list[Path],
+    mode: str,
+    threshold: int,
+    _render: UISplit,
+    hash_size: int = 8,
+) -> list[DupeGroup]:
+    assert mode in {"ahash", "phash"}
+    hasher: Callable[[Path], int]
+    if mode == "ahash":
+        hasher = functools.partial(average_hash_64, hash_size=hash_size)
+    else:
+        hasher = functools.partial(phash_64, hash_size=hash_size)
+
+    hashed: list[HashedImage] = []
+    for p in sorted(files):
+        hv = _hash_file_safe(p, hasher, _render=_render)
+        if hv is not None:
+            hashed.append(HashedImage(path=p, value=hv))
+
+    _render.log_main(
+        f"Hashed {len(hashed)} file(s) with {mode.upper()} (skipped {len(files) - len(hashed)})."
+    )
+
+    groups: list[DupeGroup] = []
+    remaining = hashed
+    while remaining:
+        seed = remaining[0]
+        rest = remaining[1:]
+        cluster = [seed]
+        survivors: list[HashedImage] = []
+        for candidate in rest:
+            if hamming_distance(seed.value, candidate.value) <= threshold:
+                cluster.append(candidate)
+            else:
+                survivors.append(candidate)
+        remaining = survivors
+
+        if len(cluster) > 1:
+            digest = f"{seed.value:016x}"
+            paths = tuple(sorted([c.path for c in cluster]))
+            groups.append(
+                DupeGroup(
+                    digest=digest,
+                    files=paths,
+                    mode=mode,
+                    meta={"threshold": threshold, "hash_size": hash_size},
+                )
+            )
+
     groups.sort(key=lambda g: (-len(g.files), g.digest))
     return groups
 
@@ -103,6 +243,28 @@ def write_manifest(group_dir: Path, moved_to_original: list[tuple[Path, Path]]) 
         for moved, original in moved_to_original
     ]
     (group_dir / MANIFEST_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_group_meta(group_dir: Path, group: DupeGroup) -> None:
+    meta = {
+        "mode": group.mode,
+        "digest": group.digest,
+        "count": len(group.files),
+    }
+    meta.update(group.meta)
+    (group_dir / GROUP_META_NAME).write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
+
+
+def read_group_meta(group_dir: Path) -> dict[str, Any]:
+    path = group_dir / GROUP_META_NAME
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def read_manifest(group_dir: Path) -> dict[Path, Path]:
@@ -169,11 +331,9 @@ def restore_selected_and_delete_rest(
 ) -> None:
     mapping = read_manifest(group_dir)
 
+    ignore = {MANIFEST_NAME.lower(), GROUP_META_NAME.lower(), "_review_state.json"}
     present = [
-        p
-        for p in group_dir.iterdir()
-        if p.is_file()
-        and p.name.lower() not in {MANIFEST_NAME.lower(), "_review_state.json"}
+        p for p in group_dir.iterdir() if p.is_file() and p.name.lower() not in ignore
     ]
 
     for moved_path in present:
@@ -185,7 +345,7 @@ def restore_selected_and_delete_rest(
                     moved_path.rename(pending)
                     delete_with_retry(pending)
                 except Exception:
-                    _render.log_main(f"⚠️ Could not delete (locked): {moved_path}")
+                    _render.log_main(f"[WARN] Could not delete (locked): {moved_path}")
             continue
 
         original = mapping.get(moved_path)
@@ -212,9 +372,11 @@ def restore_selected_and_delete_rest(
             stuck = moved_path.with_name(moved_path.name + ".stuck")
             try:
                 moved_path.rename(stuck)
-                _render.log_main(f"⚠️ Source locked, left behind as: {stuck}")
+                _render.log_main(f"[WARN] Source locked, left behind as: {stuck}")
             except Exception:
-                _render.log_main(f"⚠️ Source locked and couldn't rename: {moved_path}")
+                _render.log_main(
+                    f"[WARN] Source locked and couldn't rename: {moved_path}"
+                )
 
 
 def stage_all_groups_into_decision_folder(
@@ -227,9 +389,18 @@ def stage_all_groups_into_decision_folder(
     created: list[Path] = []
 
     for i, grp in enumerate(groups, 1):
-        group_dir = decision_root / f"group_{i:04d}_sha_{grp.digest[:10]}"
+        if grp.mode == "exact":
+            suffix = f"sha_{grp.digest[:10]}"
+        else:
+            threshold = grp.meta.get("threshold")
+            th_s = f"t{int(threshold):02d}_" if isinstance(threshold, int) else ""
+            suffix = f"{grp.mode}_{th_s}{grp.digest[:12]}"
+
+        group_dir = decision_root / f"group_{i:04d}_{suffix}"
         if group_dir.exists():
             # If it already exists, treat it as staged and include it.
+            if not dry_run and not (group_dir / GROUP_META_NAME).exists():
+                write_group_meta(group_dir, grp)
             created.append(group_dir)
             continue
 
@@ -246,6 +417,7 @@ def stage_all_groups_into_decision_folder(
             moved_to_original.append((dst, original))
 
         write_manifest(group_dir, moved_to_original)
+        write_group_meta(group_dir, grp)
         created.append(group_dir)
 
     return created
@@ -259,14 +431,34 @@ def find_pending_group_dirs(decision_root: Path) -> list[Path]:
     return sorted(group_dirs, key=lambda p: p.name)
 
 
+def group_mode_from_dir(group_dir: Path) -> str:
+    meta = read_group_meta(group_dir)
+    mode = str(meta.get("mode", "exact")).lower()
+    if mode not in {"exact", "ahash", "phash"}:
+        return "exact"
+    return mode
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Stage all exact dupes, then review via local Flask UI."
+        description="Stage duplicate images, then review via local Flask UI."
     )
     ap.add_argument("root", type=Path, help="Root folder to scan")
     ap.add_argument("--decision-folder", type=Path, default=Path("_DECISION_DUPES"))
     ap.add_argument("--include-all", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--mode",
+        choices=["exact", "ahash", "phash"],
+        default="exact",
+        help="Duplicate detection mode.",
+    )
+    ap.add_argument(
+        "--threshold",
+        type=int,
+        default=5,
+        help="Hamming distance threshold for aHash/pHash grouping (0-64).",
+    )
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5173)
     ap.add_argument("--no-open", action="store_true")
@@ -274,6 +466,7 @@ def main() -> int:
 
     root = args.root.expanduser().resolve()
     decision_root = args.decision_folder.expanduser().resolve()
+    threshold = max(0, min(64, int(args.threshold)))
 
     ui = UISplit()
     with Live(ui.layout, console=ui.console, refresh_per_second=10, screen=True):
@@ -283,11 +476,15 @@ def main() -> int:
 
         decision_root.mkdir(parents=True, exist_ok=True)
         ui.log_main(f"Decision folder: {decision_root}")
+        ui.log_main(
+            f"Detection mode: {args.mode} "
+            f"(threshold={threshold if args.mode != 'exact' else 'n/a'})"
+        )
 
         pending = find_pending_group_dirs(decision_root)
         if pending:
             ui.log_main(
-                f"⚠️ Found {len(pending)} existing group folder(s) in {decision_root}."
+                f"[WARN] Found {len(pending)} existing group folder(s) in {decision_root}."
             )
             ui.log_main("Resuming review from decision folder (skipping rescan/hash).")
             group_dirs = pending
@@ -295,8 +492,20 @@ def main() -> int:
             files = list(iter_files(root, include_all=args.include_all))
             ui.log_main(f"Scanned: {len(files)} files under {root}")
 
-            groups = find_exact_groups(files)
-            ui.log_main(f"Exact duplicate groups found: {len(groups)}")
+            if args.mode == "exact":
+                groups = find_exact_groups(files)
+                ui.log_main(f"Exact duplicate groups found: {len(groups)}")
+            else:
+                groups = _perceptual_groups(
+                    files=files,
+                    mode=args.mode,
+                    threshold=threshold,
+                    _render=ui,
+                )
+                ui.log_main(
+                    f"{args.mode.upper()} near-duplicate groups found: {len(groups)} "
+                    f"(threshold={threshold})"
+                )
             if not groups:
                 return 0
 
@@ -324,14 +533,20 @@ def main() -> int:
 
             ui.log_main("\n" + "=" * 72)
             ui.log_main(f"Review {idx}/{len(group_dirs)}: {group_dir.name}")
+            meta = read_group_meta(group_dir)
+            mode = group_mode_from_dir(group_dir)
+            if mode != "exact" and "threshold" in meta:
+                ui.log_main(f" Mode: {mode} (threshold={meta.get('threshold')})")
+            else:
+                ui.log_main(f" Mode: {mode}")
             result = serve_review_ui(
-                server, group_dir, open_browser=(not args.no_open), mode="exact"
+                server, group_dir, open_browser=(not args.no_open), mode=mode
             )
 
             restore_selected_and_delete_rest(group_dir, result.keep_names, _render=ui)
             if not rmtree_with_retry(group_dir):
                 ui.log_main(
-                    f"⚠️ Could not remove group folder (still locked): {group_dir}"
+                    f"[WARN] Could not remove group folder (still locked): {group_dir}"
                 )
             ui.log_main("Applied selection. Next group...")
 
@@ -340,7 +555,7 @@ def main() -> int:
         for p in sorted(decision_root.glob("group_*")):
             if p.is_dir():
                 if not rmtree_with_retry(p):
-                    ui.log_main(f"⚠️ Still locked, couldn't remove: {p}")
+                    ui.log_main(f"[WARN] Still locked, couldn't remove: {p}")
 
         # If decision_root is empty now, remove it too
         try:
@@ -349,7 +564,7 @@ def main() -> int:
         except OSError:
             pass
 
-    print("\nAll groups processed. 🎉")
+    print("\nAll groups processed. Done.")
     return 0
 
 

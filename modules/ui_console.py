@@ -8,7 +8,7 @@ from rich.text import Text
 
 class UISplit:
     def __init__(self):
-        self.console = Console()
+        self.console = Console(emoji=True)
         self.layout = Layout()
 
         self.layout.split_row(

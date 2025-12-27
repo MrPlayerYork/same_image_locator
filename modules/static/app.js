@@ -73,7 +73,7 @@ function mkCard(item) {
 
     const folder = document.createElement("div");
     folder.className = "folder";
-    folder.textContent = item.folder_name ? ("📁 " + item.folder_name) : "📁 unknown";
+    folder.textContent = item.folder_name ? ("📁 " + item.folder_name) : "folder unknown";
 
     const preferBtn = document.createElement("button");
     preferBtn.className = "preferBtn";
@@ -86,7 +86,7 @@ function mkCard(item) {
         card.classList.toggle("preferred", isPref);
         preferBtn.classList.toggle("on", isPref);
         preferBtn.textContent = isPref
-            ? "Preferred ✅"
+            ? "Preferred (current)"
             : "Prefer this folder";
     }
 
@@ -204,7 +204,7 @@ async function refresh() {
     ITEMS = data.items || [];
     KEEP = new Set(data.keep || []);
     finishedClicks = data.finished_clicks || 0;
-    AUTO_FINISH = !!data.auto_finish;
+    AUTO_FINISH = MODE === "exact" ? !!data.auto_finish : false;
 
     STATUS.textContent = "Active group: " + data.group_dir + "  (mode: " + MODE + ")";
     FINISHED.textContent = "Finished clicks: " + finishedClicks + "/2";
