@@ -14,7 +14,10 @@ __Recommended that you save a copy of your files before use as to not accidental
 ## Requirements
 
 - Python 3.13+
-- Install dependencies with `pip install -r requirements.txt` (you can generate one from `pyproject.toml` if needed) or `pip install flask pillow python-dotenv rich numpy`.
+- Install dependencies with:
+   - `pip install -r requirements.txt`
+   - `pip install flask pillow python-dotenv rich numpy`
+   - `uv sync`
 
 ## How it works
 
