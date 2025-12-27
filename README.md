@@ -53,3 +53,12 @@ python find_dupe_images.py /path/to/photos
 Auto-finish (double-click automation when exactly one image is selected) is only available in `exact` mode; it is automatically disabled for perceptual modes where human review matters more.
 
 If you have a workflow where one folder should always win, the UI remembers your preferred folders and auto-selects their files in later groups (see `modules/web_review.py` for preference handling).
+
+<div align="center">
+  <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/">
+    <img src="https://mirrors.creativecommons.org/presskit/icons/cc.svg" alt="CC" width="25">
+    <img src="https://mirrors.creativecommons.org/presskit/icons/by.svg" alt="BY" width="25">
+    <img src="https://mirrors.creativecommons.org/presskit/icons/nc.svg" alt="NC" width="25">
+    <img src="https://mirrors.creativecommons.org/presskit/icons/sa.svg" alt="SA" width="25">
+  </a>
+</div>
