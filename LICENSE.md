@@ -1,18 +1,11 @@
 <div align="center">
-  <h2>
+  <h3>
     <a href="https://github.com/MrPlayerYork/same_image_locator">Same Image Locator</a>
     © 2025 by
     <a href="https://github.com/MrPlayerYork">MrPlayerYork</a>
     is licensed under
     <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>
-  </h2>
-
-  <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/">
-    <img src="https://mirrors.creativecommons.org/presskit/icons/cc.svg" alt="CC" width="80">
-    <img src="https://mirrors.creativecommons.org/presskit/icons/by.svg" alt="BY" width="80">
-    <img src="https://mirrors.creativecommons.org/presskit/icons/nc.svg" alt="NC" width="80">
-    <img src="https://mirrors.creativecommons.org/presskit/icons/sa.svg" alt="SA" width="80">
-  </a>
+  </h3>
 </div>
 
 
